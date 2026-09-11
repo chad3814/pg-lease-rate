@@ -24,6 +24,11 @@ type Config struct {
 	// ListenAddr is the address the Postgres-wire listener binds to.
 	ListenAddr string
 
+	// DatabaseURL is the metadata database this gateway reads leases from.
+	// It is kept as an opaque string so that this package takes no driver
+	// dependency; internal/store parses it and reports a useful error.
+	DatabaseURL string
+
 	// MaxMessageBytes caps the body of a single protocol message.
 	MaxMessageBytes int
 
@@ -48,6 +53,7 @@ type Getenv func(name string) string
 func Default() Config {
 	return Config{
 		ListenAddr:      ":6432",
+		DatabaseURL:     "postgres://postgres:postgres@127.0.0.1:5432/pglr?sslmode=disable",
 		MaxMessageBytes: pgwire.DefaultMaxMessageBytes,
 		StartupTimeout:  10 * time.Second,
 		ShutdownTimeout: 10 * time.Second,
@@ -64,6 +70,9 @@ func Load(getenv Getenv) (Config, error) {
 
 	if v := getenv(envPrefix + "LISTEN_ADDR"); v != "" {
 		cfg.ListenAddr = v
+	}
+	if v := getenv(envPrefix + "DATABASE_URL"); v != "" {
+		cfg.DatabaseURL = v
 	}
 	if cfg.MaxMessageBytes, err = envInt(getenv, "MAX_MESSAGE_BYTES", cfg.MaxMessageBytes); err != nil {
 		return Config{}, err
@@ -88,6 +97,9 @@ func Load(getenv Getenv) (Config, error) {
 func (c Config) Validate() error {
 	if c.ListenAddr == "" {
 		return fmt.Errorf("config: %sLISTEN_ADDR must not be empty", envPrefix)
+	}
+	if c.DatabaseURL == "" {
+		return fmt.Errorf("config: %sDATABASE_URL must not be empty", envPrefix)
 	}
 	if c.MaxMessageBytes <= 0 {
 		return fmt.Errorf("config: %sMAX_MESSAGE_BYTES must be positive, got %d", envPrefix, c.MaxMessageBytes)

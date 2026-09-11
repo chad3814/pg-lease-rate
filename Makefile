@@ -7,7 +7,7 @@ all: fmt-check vet test build
 
 .PHONY: build
 build:
-	go build -o $(BIN) ./cmd/pglrd
+	go build -o bin/ ./cmd/...
 
 .PHONY: run
 run:
@@ -16,6 +16,18 @@ run:
 .PHONY: test
 test:
 	go test -race $(PKG)
+
+.PHONY: migrate
+migrate:
+	go run ./cmd/pglr-migrate up
+
+.PHONY: migrate-down
+migrate-down:
+	go run ./cmd/pglr-migrate down
+
+.PHONY: migrate-status
+migrate-status:
+	go run ./cmd/pglr-migrate status
 
 .PHONY: cover
 cover:

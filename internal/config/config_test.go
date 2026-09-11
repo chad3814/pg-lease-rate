@@ -37,6 +37,7 @@ func TestLoad(t *testing.T) {
 			name: "every setting overridden",
 			env: map[string]string{
 				envPrefix + "LISTEN_ADDR":       "127.0.0.1:15432",
+				envPrefix + "DATABASE_URL":      "postgres://u@h:5/d",
 				envPrefix + "MAX_MESSAGE_BYTES": "1048576",
 				envPrefix + "STARTUP_TIMEOUT":   "3s",
 				envPrefix + "SHUTDOWN_TIMEOUT":  "1m30s",
@@ -44,6 +45,7 @@ func TestLoad(t *testing.T) {
 			},
 			want: Config{
 				ListenAddr:      "127.0.0.1:15432",
+				DatabaseURL:     "postgres://u@h:5/d",
 				MaxMessageBytes: 1 << 20,
 				StartupTimeout:  3 * time.Second,
 				ShutdownTimeout: 90 * time.Second,
@@ -152,6 +154,11 @@ func TestValidate(t *testing.T) {
 			name:        "empty listen address",
 			mutate:      func(c *Config) { c.ListenAddr = "" },
 			wantErrPart: "LISTEN_ADDR",
+		},
+		{
+			name:        "empty database url",
+			mutate:      func(c *Config) { c.DatabaseURL = "" },
+			wantErrPart: "DATABASE_URL",
 		},
 	}
 
