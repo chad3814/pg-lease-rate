@@ -51,7 +51,7 @@ func run(args []string) error {
 
 	db, err := sql.Open("pgx", cfg.DatabaseURL)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", cfg.DatabaseURL, err)
+		return fmt.Errorf("open database: %w", err)
 	}
 	defer func() {
 		_ = db.Close()

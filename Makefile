@@ -1,6 +1,4 @@
-BINARY := pglrd
-PKG    := ./...
-BIN    := bin/$(BINARY)
+PKG := ./...
 
 .PHONY: all
 all: fmt-check vet test build

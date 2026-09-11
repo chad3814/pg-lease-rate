@@ -27,8 +27,7 @@ func TestPostgresConformance(t *testing.T) {
 	// silent skip is how integration suites rot.
 	pg, err := NewPostgres(ctx, testDatabaseURL())
 	if err != nil {
-		t.Fatalf("NewPostgres(%s): %v\nis the database up and migrated? try: make up && make migrate",
-			testDatabaseURL(), err)
+		t.Fatalf("NewPostgres(): %v\nis the database up and migrated? try: make up && make migrate", err)
 	}
 	t.Cleanup(pg.Close)
 

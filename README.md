@@ -128,6 +128,8 @@ make lint              # golangci-lint
 make up / down         # local Postgres and Redis
 make migrate           # apply pending migrations
 make migrate-status    # show which migrations are applied
+make migrate-down      # roll back the most recent migration -- currently
+                        # the only one, so this drops both tenants and leases
 ```
 
 Configuration is read from the environment; see `.env.example`. Every setting

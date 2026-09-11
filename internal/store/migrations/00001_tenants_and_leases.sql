@@ -28,5 +28,6 @@ CREATE UNIQUE INDEX leases_lease_key_key ON leases (lease_key);
 CREATE INDEX leases_tenant_id_idx ON leases (tenant_id);
 
 -- +goose Down
+-- Destroys all tenant and lease data.
 DROP TABLE leases;
 DROP TABLE tenants;
