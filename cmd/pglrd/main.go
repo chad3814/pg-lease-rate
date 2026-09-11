@@ -1,8 +1,9 @@
 // Command pglrd runs the pg-lease-rate gateway.
 //
 // Configuration comes from the environment; see internal/config and
-// .env.example. The process serves until it receives SIGINT or SIGTERM, then
-// drains in-flight connections before exiting.
+// .env.example. Startup verifies that the metadata database is migrated to the
+// schema version this build expects, then serves until it receives SIGINT or
+// SIGTERM, then drains in-flight connections before exiting.
 package main
 
 import (
@@ -15,6 +16,7 @@ import (
 
 	"github.com/chad3814/pg-lease-rate/internal/config"
 	"github.com/chad3814/pg-lease-rate/internal/gateway"
+	"github.com/chad3814/pg-lease-rate/internal/store"
 )
 
 func main() {
@@ -36,6 +38,12 @@ func run() error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// Refuse to serve against a schema this build does not understand.
+	// Migrations are applied by pglr-migrate, not here.
+	if err := store.CheckSchema(ctx, cfg.DatabaseURL); err != nil {
+		return err
+	}
 
 	return gateway.New(cfg, logger).ListenAndServe(ctx)
 }
