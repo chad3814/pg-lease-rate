@@ -1,0 +1,19 @@
+# Build output
+/bin/
+/dist/
+
+# Test and coverage artifacts
+*.test
+*.out
+coverage.html
+
+# Local environment overrides
+.env
+.env.*
+!.env.example
+
+# Editor / OS noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
