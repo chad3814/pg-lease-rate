@@ -21,12 +21,17 @@ DETAIL:  parsed a protocol 3.0 startup for user "chad", database "lease_abc123"
 HINT:  lease resolution and message relay are not implemented yet
 ```
 
-Lease resolution, authentication, rate limiting, and message relay are not
-implemented. Nothing is stubbed: every function present does what its
-documentation says.
+Lease metadata is durable. `internal/store` resolves a lease key and token to a
+backend database, backed by PostgreSQL or by an in-memory implementation that
+the same conformance suite exercises. The gateway verifies the schema version
+at startup but does not yet consult the store: authentication, rate limiting
+and message relay are still unimplemented. Nothing is stubbed: every function
+present does what its documentation says.
 
-There are no external module dependencies. The protocol implementation is
-standard library only.
+Two external dependencies: `github.com/jackc/pgx/v5` for PostgreSQL and
+`github.com/pressly/goose/v3` for migrations. goose is imported only by
+`cmd/pglr-migrate` and is not linked into the gateway. The protocol
+implementation in `internal/pgwire` remains standard library only.
 
 ## Why two datastores
 
@@ -43,6 +48,10 @@ batched and written asynchronously so that a slow write cannot stall a query.
 
 Postgres is also the thing being proxied, which means the gateway's own
 metadata and the databases it hands out live in the same engine.
+
+The leases table holds no credentials. A lease row names a backend host, port
+and database; the gateway dials it with its own credentials, so a read-only
+leak of metadata does not hand over the backends.
 
 ## Protocol notes
 
@@ -100,19 +109,25 @@ and written down here, because it is the question that gets asked first.
 
 ```plain
 cmd/pglrd/            the gateway daemon
+cmd/pglr-migrate/     schema migrations
 internal/config/      environment-backed configuration
 internal/pgwire/      protocol framing, startup parsing, ErrorResponse
 internal/gateway/     listener, startup exchange, graceful shutdown
+internal/store/       tenant and lease metadata, PostgreSQL and in-memory
 ```
 
 ## Running it
 
 ```sh
-make build        # build bin/pglrd
-make run          # run against the default configuration
-make test         # go test -race ./...
-make all          # fmt-check, vet, test, build
-make up / down    # local Postgres and Redis
+make build             # build bin/pglrd and bin/pglr-migrate
+make run               # run against the default configuration
+make test              # go test -race ./... -- hermetic, no Docker
+make test-integration  # go test -race -tags integration ./... -- needs make up
+make all               # fmt-check, vet, test, build
+make lint              # golangci-lint
+make up / down         # local Postgres and Redis
+make migrate           # apply pending migrations
+make migrate-status    # show which migrations are applied
 ```
 
 Configuration is read from the environment; see `.env.example`. Every setting
@@ -121,15 +136,17 @@ silently widening a limit.
 
 ## Next steps
 
+Step 1 is done: the lease metadata schema and store exist, keyed by the
+`database` startup parameter.
+
 In dependency order:
 
-1. Lease metadata schema and store, keyed by the `database` startup parameter.
-2. Cleartext-password authentication against a lease token.
-3. Backend dial and bidirectional relay, respecting transaction boundaries.
-4. Redis token bucket with a Lua check-and-decrement, injecting an
+1. Cleartext-password authentication against a lease token.
+2. Backend dial and bidirectional relay, respecting transaction boundaries.
+3. Redis token bucket with a Lua check-and-decrement, injecting an
    `ErrorResponse` with SQLSTATE `53400` when a budget is exhausted.
-5. Asynchronous batched usage rollups into Postgres.
-6. An admin CLI over the lease and limit tables.
+4. Asynchronous batched usage rollups into Postgres.
+5. An admin CLI over the lease and limit tables.
 
 ## License
 
