@@ -36,6 +36,8 @@ var (
 	ErrAlreadyExists = errors.New("store: already exists")
 	// ErrInvalidLease reports a NewLease that fails validation.
 	ErrInvalidLease = errors.New("store: invalid lease")
+	// ErrInvalidTenant reports a tenant name that fails validation.
+	ErrInvalidTenant = errors.New("store: invalid tenant")
 	// ErrSchemaVersion reports a database whose applied migration version is
 	// not the one this build expects.
 	ErrSchemaVersion = errors.New("store: unexpected schema version")
@@ -48,6 +50,38 @@ const DefaultBackendPort = 5432
 // parameter and reaches the logs. 63 bytes is PostgreSQL's identifier limit.
 var leaseKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,63}$`)
 
+// uuidPattern matches the canonical 8-4-4-4-12 hex form Postgres's uuid type
+// accepts. NewLease.Validate uses it so that a malformed TenantID is rejected
+// in Go, in one place, before either implementation touches storage: *Memory
+// has no uuid column to catch it, and *Postgres's SQLSTATE 22P02 for a
+// malformed literal maps to no sentinel, so without this check the two
+// implementations report different errors for the same bad input.
+var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// maxTenantNameBytes bounds a tenant name for the same reason
+// leaseKeyPattern bounds a lease key: it arrives from an untrusted operator
+// input and reaches the logs.
+const maxTenantNameBytes = 200
+
+// validateTenantName reports whether name can be stored. Both
+// implementations call it before any write, so the rule lives in one place.
+// A name must be non-empty, at most maxTenantNameBytes, and free of ASCII
+// control characters, including NUL.
+func validateTenantName(name string) error {
+	if name == "" {
+		return fmt.Errorf("%w: name is empty", ErrInvalidTenant)
+	}
+	if len(name) > maxTenantNameBytes {
+		return fmt.Errorf("%w: name is %d bytes, over the %d byte limit", ErrInvalidTenant, len(name), maxTenantNameBytes)
+	}
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("%w: name %q contains a control character", ErrInvalidTenant, name)
+		}
+	}
+	return nil
+}
+
 // Token is a lease's plaintext secret. It is returned exactly once, when the
 // lease is created, and is never stored: only its hash is.
 //
@@ -58,10 +92,20 @@ type Token string
 
 // String redacts. Call string(t) to obtain the real value.
 //
-// This covers every fmt verb that go vet accepts. A numeric verb such as %d
-// embeds the value in fmt's bad-verb message, but vet rejects that at build
-// time and make all runs vet.
+// fmt derives %v, %s, %q, %x, %X, and their composition inside structs and
+// slices, from Stringer, so String covers all of those. It does not cover
+// %#v, which fmt derives from GoStringer instead, nor encoding/json, which
+// uses encoding.TextMarshaler; see GoString and MarshalText for those. A
+// numeric verb such as %d still embeds the real value in fmt's bad-verb
+// message, but go vet rejects that at build time and make all runs vet.
 func (t Token) String() string { return "[REDACTED]" }
+
+// GoString redacts %#v, which fmt.GoStringer governs instead of Stringer.
+func (t Token) GoString() string { return `store.Token("[REDACTED]")` }
+
+// MarshalText redacts encoding/json and anything else built on
+// encoding.TextMarshaler, none of which consult String.
+func (t Token) MarshalText() ([]byte, error) { return []byte("[REDACTED]"), nil }
 
 // LogValue redacts in slog output.
 func (t Token) LogValue() slog.Value { return slog.StringValue("[REDACTED]") }
@@ -129,6 +173,9 @@ type NewLease struct {
 func (n NewLease) Validate() error {
 	if n.TenantID == "" {
 		return fmt.Errorf("%w: tenant id is empty", ErrInvalidLease)
+	}
+	if !uuidPattern.MatchString(n.TenantID) {
+		return fmt.Errorf("%w: tenant id %q is not a UUID", ErrInvalidLease, n.TenantID)
 	}
 	if !leaseKeyPattern.MatchString(n.Key) {
 		return fmt.Errorf("%w: key %q must match %s", ErrInvalidLease, n.Key, leaseKeyPattern)

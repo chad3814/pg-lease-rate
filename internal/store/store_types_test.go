@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -196,6 +197,25 @@ func TestTokenRedacts(t *testing.T) {
 	slog.New(slog.NewTextHandler(&buf, nil)).Info("m", "token", tok)
 	if strings.Contains(buf.String(), secret) {
 		t.Errorf("slog leaked the token: %s", buf.String())
+	}
+
+	// %#v is governed by fmt.GoStringer, not Stringer, so String does not
+	// cover it: this was the finding. GoString closes the gap.
+	if got := fmt.Sprintf("%#v", tok); strings.Contains(got, secret) {
+		t.Errorf("%%#v leaked the token: %s", got)
+	}
+	if got := fmt.Sprintf("%#v", struct{ T Token }{tok}); strings.Contains(got, secret) {
+		t.Errorf("%%#v on a struct leaked the token: %s", got)
+	}
+
+	// encoding/json uses encoding.TextMarshaler, not Stringer, so String does
+	// not cover it either: MarshalText closes the gap.
+	b, err := json.Marshal(tok)
+	if err != nil {
+		t.Fatalf("json.Marshal() unexpected error: %v", err)
+	}
+	if strings.Contains(string(b), secret) {
+		t.Errorf("json.Marshal leaked the token: %s", b)
 	}
 
 	if string(tok) != secret {

@@ -49,6 +49,10 @@ func (p *Postgres) Close() { p.pool.Close() }
 
 // CreateTenant implements Admin.
 func (p *Postgres) CreateTenant(ctx context.Context, name string) (Tenant, error) {
+	if err := validateTenantName(name); err != nil {
+		return Tenant{}, err
+	}
+
 	const q = `INSERT INTO tenants (name) VALUES ($1) RETURNING id, name, created_at`
 
 	var t Tenant

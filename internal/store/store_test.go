@@ -26,9 +26,31 @@ func newLeaseFor(tenantID, key string) NewLease {
 	}
 }
 
+// assertTimeWithinMicrosecond compares got and want after truncating both to
+// microsecond precision in UTC, rather than with == or reflect.DeepEqual.
+// *Postgres's timestamptz column truncates to microseconds and pgx returns
+// its own Location with no monotonic reading, so an exact comparison would
+// pass against *Memory and fail against *Postgres for the same input.
+func assertTimeWithinMicrosecond(t *testing.T, what string, got, want time.Time) {
+	t.Helper()
+	gotTrunc := got.UTC().Truncate(time.Microsecond)
+	wantTrunc := want.UTC().Truncate(time.Microsecond)
+	if !gotTrunc.Equal(wantTrunc) {
+		t.Errorf("%s = %v, want %v (both truncated to microsecond precision)", what, got, want)
+	}
+}
+
 // runConformance is the contract every Store implementation must satisfy. It
 // is run against *Memory on every build and against *Postgres under the
 // integration tag, so the two cannot drift.
+//
+// Three defects found in review shared one root cause: this suite tested
+// happy paths and named-error paths well, but never probed the boundary
+// where a Go type is wider than its SQL column — an arbitrary string handed
+// to a uuid column, an ExpiresAt more precise than timestamptz, a tenant
+// name with no bound in Go reaching an unbounded text column. Any future
+// column of type inet, numeric, or an enum deserves the same scrutiny:
+// that boundary is where the fake and the database drift.
 func runConformance(t *testing.T, newStore func(*testing.T) testStore) {
 	t.Helper()
 	ctx := context.Background()
@@ -147,6 +169,31 @@ func runConformance(t *testing.T, newStore func(*testing.T) testStore) {
 		}
 	})
 
+	// Regression test for the boundary this suite used to miss: *Memory used
+	// to store ExpiresAt verbatim, preserving nanoseconds, Location, and a
+	// monotonic reading that *Postgres's timestamptz column cannot. Compare
+	// after truncating both sides to microsecond precision, in UTC, rather
+	// than with == or reflect.DeepEqual, which would reintroduce a
+	// monotonic-clock dependence this fix removes.
+	t.Run("ExpiresAt round-trips to microsecond precision", func(t *testing.T) {
+		s := newStore(t)
+		tenant, _ := s.CreateTenant(ctx, "acme")
+		in := newLeaseFor(tenant.ID, "lease_abc123")
+		in.ExpiresAt = time.Now().Add(time.Hour)
+
+		created, _, err := s.CreateLease(ctx, in)
+		if err != nil {
+			t.Fatalf("CreateLease() unexpected error: %v", err)
+		}
+		assertTimeWithinMicrosecond(t, "CreateLease() ExpiresAt", created.ExpiresAt, in.ExpiresAt)
+
+		got, err := s.Lease(ctx, "lease_abc123")
+		if err != nil {
+			t.Fatalf("Lease() unexpected error: %v", err)
+		}
+		assertTimeWithinMicrosecond(t, "Lease() ExpiresAt", got.ExpiresAt, in.ExpiresAt)
+	})
+
 	t.Run("duplicate lease key", func(t *testing.T) {
 		s := newStore(t)
 		tenant, _ := s.CreateTenant(ctx, "acme")
@@ -176,6 +223,22 @@ func runConformance(t *testing.T, newStore func(*testing.T) testStore) {
 		}
 	})
 
+	// Regression test for the boundary this suite used to miss: a
+	// well-formed UUID with no row is ErrTenantNotFound (above), but a
+	// malformed TenantID never reaches storage at all -- it fails
+	// validation, which both implementations must agree is ErrInvalidLease,
+	// not ErrTenantNotFound. Postgres alone would report this as SQLSTATE
+	// 22P02 for the uuid column, which mapError does not translate to any
+	// sentinel; *Memory has no column to catch it at all. NewLease.Validate
+	// closes the gap for both.
+	t.Run("lease under a malformed tenant id", func(t *testing.T) {
+		s := newStore(t)
+		in := newLeaseFor("not-a-uuid", "lease_abc123")
+		if _, _, err := s.CreateLease(ctx, in); !errors.Is(err, ErrInvalidLease) {
+			t.Errorf("CreateLease() error = %v, want ErrInvalidLease", err)
+		}
+	})
+
 	t.Run("invalid lease is rejected before any write", func(t *testing.T) {
 		s := newStore(t)
 		tenant, _ := s.CreateTenant(ctx, "acme")
@@ -195,6 +258,23 @@ func runConformance(t *testing.T, newStore func(*testing.T) testStore) {
 				mutate(&in)
 				if _, _, err := s.CreateLease(ctx, in); !errors.Is(err, ErrInvalidLease) {
 					t.Errorf("CreateLease() error = %v, want ErrInvalidLease", err)
+				}
+			})
+		}
+	})
+
+	t.Run("CreateTenant rejects an invalid name", func(t *testing.T) {
+		s := newStore(t)
+
+		bad := map[string]string{
+			"empty name":          "",
+			"name with a NUL":     "with\x00nul",
+			"name over 200 bytes": strings.Repeat("a", 201),
+		}
+		for name, tenantName := range bad {
+			t.Run(name, func(t *testing.T) {
+				if _, err := s.CreateTenant(ctx, tenantName); !errors.Is(err, ErrInvalidTenant) {
+					t.Errorf("CreateTenant(%q) error = %v, want ErrInvalidTenant", tenantName, err)
 				}
 			})
 		}
