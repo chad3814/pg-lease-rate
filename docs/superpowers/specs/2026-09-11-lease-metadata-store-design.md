@@ -146,6 +146,31 @@ Surrogate UUID primary keys with `lease_key` as a unique natural key, because
 step 5's usage rollups will reference leases and a 16-byte stable key beats
 repeating a 63-byte text key across a high-volume table.
 
+A `NewLease.TenantID` is validated as a UUID shape before either
+implementation touches storage, for the same reason `lease_key` is validated
+against `leaseKeyPattern` rather than left to the schema: `*Memory` has no
+`uuid` column to reject a malformed value, and `*Postgres`'s SQLSTATE `22P02`
+for a malformed literal maps to no sentinel in `mapError`. Without the Go-side
+check, a malformed `TenantID` reports `ErrTenantNotFound` from `*Memory` and
+an unmapped raw error from `*Postgres` — the two implementations disagreeing
+on the one input shape the conformance suite's well-formed-UUID case never
+tried. A malformed `TenantID` is `ErrInvalidLease`; a well-formed but absent
+one remains `ErrTenantNotFound`.
+
+### Tenant names
+
+`CreateTenant` validates `name` before either implementation writes it, the
+same treatment lease keys get and for the same reason: `leaseKeyPattern`'s
+comment notes that it bounds "a value that arrives from an untrusted startup
+parameter and reaches the logs," and a tenant name is exactly that kind of
+value, just supplied by an operator instead of a client. The rules are
+non-empty, at most 200 bytes, and no ASCII control characters, including NUL
+— enough to stop an empty or unbounded name and to stop a name from injecting
+a NUL or another control byte into a log line, without imposing a charset
+narrow enough to reject a legitimate display name. `ErrInvalidTenant` is the
+sentinel for a rejection; both implementations call the same unexported
+`validateTenantName` so the rule lives in one place.
+
 ## Schema
 
 `internal/store/migrations/00001_tenants_and_leases.sql`:
@@ -227,8 +252,18 @@ and the schema check.
 // and never stored.
 type Token string
 
-// String redacts. Call string(t) to obtain the real value.
+// String redacts. Call string(t) to obtain the real value. Covers every verb
+// fmt derives from Stringer: %v, %s, %q, %x, %X. Does not cover %#v (see
+// GoString) or encoding/json (see MarshalText), which use different
+// interfaces fmt and encoding/json consult instead of Stringer.
 func (t Token) String() string { return "[REDACTED]" }
+
+// GoString redacts %#v, which fmt.GoStringer governs instead of Stringer.
+func (t Token) GoString() string { return `store.Token("[REDACTED]")` }
+
+// MarshalText redacts encoding/json and anything else built on
+// encoding.TextMarshaler.
+func (t Token) MarshalText() ([]byte, error) { return []byte("[REDACTED]"), nil }
 
 // LogValue redacts in slog output.
 func (t Token) LogValue() slog.Value { return slog.StringValue("[REDACTED]") }
@@ -279,13 +314,24 @@ testable without injecting a clock — the same approach as
 ### Extent of token redaction
 
 Verified empirically. A `Token` renders as `[REDACTED]` under `%v`, `%s`, `%q`,
-`%x`, `fmt.Sprint`, `fmt.Println`, `%+v` inside a struct, and `slog`.
+`%x`, `fmt.Sprint`, `fmt.Println`, `%+v` inside a struct, and `slog`, because
+fmt derives all of those from `String` (`fmt.Stringer`).
 
-One gap: a numeric verb such as `%d` produces fmt's bad-verb message,
-`%!d(store.Token=<value>)`, which embeds the real value. `go vet` rejects that
-at build time and `make all` runs `vet`, so the redaction holds for every verb
-that compiles clean. It is not an absolute guarantee and should not be
-described as one.
+Two further gaps exist, and are closed by dedicated methods rather than by
+`go vet`, because the earlier claim that "the redaction holds for every verb
+that compiles clean" was false: `%#v` compiles clean, passes vet, and leaked
+before this fix.
+
+- `%#v` is governed by `fmt.GoStringer`, not `fmt.Stringer`, so `String` does
+  not cover it. `GoString` closes this, returning `store.Token("[REDACTED]")`.
+- `encoding/json`, and anything else built on `encoding.TextMarshaler`, does
+  not consult `String` either. `MarshalText` closes this.
+
+One gap remains, and is closed by tooling rather than by a method: a numeric
+verb such as `%d` produces fmt's bad-verb message, `%!d(store.Token=<value>)`,
+which embeds the real value. `go vet` rejects that at build time and
+`make all` runs `vet`. This is the only remaining case where the guarantee is
+not absolute, and it should not be described as covering more than it does.
 
 ## Interfaces
 
@@ -298,14 +344,16 @@ type LeaseAuthenticator interface {
 
 // Admin is for tests and the step-6 CLI. The gateway must not depend on it.
 type Admin interface {
-    // CreateTenant returns ErrAlreadyExists if the name is taken, compared
-    // case-insensitively.
+    // CreateTenant returns ErrInvalidTenant for a name that fails
+    // validateTenantName, and ErrAlreadyExists if the name is taken,
+    // compared case-insensitively.
     CreateTenant(ctx context.Context, name string) (Tenant, error)
 
     // CreateLease validates in, generates a token, stores its hash, and
     // returns the plaintext token exactly once. Returns ErrInvalidLease for a
-    // bad key or port, ErrTenantNotFound for an unknown TenantID, and
-    // ErrAlreadyExists for a duplicate key.
+    // bad key, port, or malformed TenantID, ErrTenantNotFound for a
+    // well-formed but unknown TenantID, and ErrAlreadyExists for a duplicate
+    // key.
     CreateLease(ctx context.Context, in NewLease) (Lease, Token, error)
 
     // Lease reads a lease without authenticating it. It returns revoked and
@@ -346,6 +394,7 @@ var (
     ErrTenantNotFound = errors.New("store: tenant not found")
     ErrAlreadyExists  = errors.New("store: already exists")
     ErrInvalidLease   = errors.New("store: invalid lease")
+    ErrInvalidTenant  = errors.New("store: invalid tenant")
     ErrSchemaVersion  = errors.New("store: unexpected schema version")
 )
 ```
@@ -550,10 +599,13 @@ Cases:
 | revoked lease, wrong token | `ErrTokenMismatch`, not `ErrLeaseRevoked` |
 | duplicate lease key | `ErrAlreadyExists` |
 | duplicate tenant name, different case | `ErrAlreadyExists` |
-| lease under an unknown tenant | `ErrTenantNotFound` |
+| lease under an unknown tenant (well-formed UUID) | `ErrTenantNotFound` |
+| lease under a malformed tenant id | `ErrInvalidLease` |
 | invalid lease key | `ErrInvalidLease` |
 | invalid backend port | `ErrInvalidLease` |
 | zero backend port | defaults to 5432 |
+| `CreateTenant` with an empty, NUL-containing, or over-200-byte name | `ErrInvalidTenant` |
+| `ExpiresAt` round-trip through `CreateLease` and `Lease()` | equal to within microsecond precision |
 | `Lease()` on a revoked lease | returns the row with `RevokedAt` set |
 | `Lease()` on an unknown key | `ErrLeaseNotFound` |
 | `RevokeLease` twice | second call succeeds, timestamp unchanged |
@@ -563,6 +615,13 @@ Cases:
 The "revoked lease, wrong token" case pins the ordering decision: it would
 pass trivially if the status checks ran first, and it is the regression test
 for that.
+
+The malformed-tenant-id, tenant-name-validation, and `ExpiresAt` round-trip
+cases pin a different property: a final whole-branch review found that all
+three were places where `*Memory` and `*Postgres` could silently disagree,
+because the suite never probed the boundary where a Go type is wider than its
+SQL column. `runConformance`'s doc comment names this defect class so a later
+reader adds the same scrutiny for a future `inet`, `numeric`, or enum column.
 
 `memory_test.go` runs the suite against `*Memory` on every `make test`.
 
