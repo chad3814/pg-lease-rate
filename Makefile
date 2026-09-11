@@ -29,6 +29,10 @@ migrate-down:
 migrate-status:
 	go run ./cmd/pglr-migrate status
 
+.PHONY: test-integration
+test-integration:
+	go test -race -tags integration $(PKG)
+
 .PHONY: cover
 cover:
 	go test -race -coverprofile=coverage.out $(PKG)
