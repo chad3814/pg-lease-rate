@@ -102,24 +102,25 @@ func (p *Postgres) Lease(ctx context.Context, leaseKey string) (Lease, error) {
 	return lease, nil
 }
 
-// RevokeLease implements Admin. The WHERE clause makes it idempotent: a
-// second revoke matches no row and leaves the original timestamp alone.
+// RevokeLease implements Admin. The UPDATE and the existence check are one
+// statement so they share a snapshot: a lease created between them cannot make
+// a revocation that changed nothing look like success. The WHERE clause makes
+// it idempotent, preserving the original timestamp.
 func (p *Postgres) RevokeLease(ctx context.Context, leaseKey string) error {
-	const q = `UPDATE leases SET revoked_at = now()
-		WHERE lease_key = $1 AND revoked_at IS NULL`
+	const q = `WITH updated AS (
+		UPDATE leases SET revoked_at = now()
+		WHERE lease_key = $1 AND revoked_at IS NULL
+		RETURNING 1
+	)
+	SELECT EXISTS(SELECT 1 FROM updated),
+	       EXISTS(SELECT 1 FROM leases WHERE lease_key = $1)`
 
-	tag, err := p.pool.Exec(ctx, q, leaseKey)
-	if err != nil {
+	var revokedNow, exists bool
+	if err := p.pool.QueryRow(ctx, q, leaseKey).Scan(&revokedNow, &exists); err != nil {
 		return p.mapError(err, fmt.Sprintf("revoke lease %q", leaseKey))
 	}
-	if tag.RowsAffected() == 1 {
-		return nil
-	}
-
-	// No row changed: either the lease does not exist, or it was already
-	// revoked. Only the first is an error.
-	if _, err := p.Lease(ctx, leaseKey); err != nil {
-		return err
+	if !revokedNow && !exists {
+		return fmt.Errorf("%w: %q", ErrLeaseNotFound, leaseKey)
 	}
 	return nil
 }
